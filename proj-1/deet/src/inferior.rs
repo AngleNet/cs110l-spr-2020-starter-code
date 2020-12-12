@@ -6,6 +6,7 @@ use std::os::unix::process::CommandExt;
 use std::process::Child;
 use std::process::Command;
 
+#[derive(Debug)]
 pub enum Status {
     /// Indicates inferior stopped. Contains the signal that stopped the process, as well as the
     /// current instruction pointer that it is stopped at.
@@ -37,19 +38,23 @@ impl Inferior {
     /// an error is encountered.
     pub fn new(target: &str, args: &Vec<String>) -> Option<Inferior> {
         let mut cmd = Command::new(target);
+        cmd.args(args);
         unsafe {
-            cmd.args(args).pre_exec(|| {
-                println!("in side");
-                return Ok(());
-            });
+            cmd.pre_exec(child_traceme);
         }
-        let child = cmd.args(args).spawn();
-        if child.is_err() {
-            return None;
+        let child = cmd.spawn().ok()?;
+        let inf = Inferior { child };
+        match inf.wait(None).ok()? {
+            Status::Signaled(signal::Signal::SIGTRAP) => Some(inf),
+            Status::Stopped(signal::Signal::SIGTRAP, _) => Some(inf),
+            other => {
+                println!(
+                    "wait for the starting process to be trapped, but: {:?}",
+                    other
+                );
+                None
+            }
         }
-        Some(Inferior {
-            child: child.unwrap(),
-        })
     }
 
     /// Returns the pid of this inferior.
@@ -69,5 +74,10 @@ impl Inferior {
             }
             other => panic!("waitpid returned unexpected status: {:?}", other),
         })
+    }
+
+    pub fn continued(&mut self) -> Result<Status, nix::Error> {
+        ptrace::cont(self.pid(), None)?;
+        Ok(self.wait(None)?)
     }
 }
